@@ -2,9 +2,7 @@
 
 一款极简、轻量、高性能且注重隐私保护的单文件 PHP 图床系统。无需数据库，开箱即用，支持秒传去重、分片断点传输、并发重试与 EXIF 隐私地理位置自动擦除。
 
-![PHP Version](https://img.shields.io/badge/PHP-7.4%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Database](https://img.shields.io/badge/database-Flat%20File-orange)
+![PHP Version](https://img.shields.io/badge/PHP-7.4%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Database](https://img.shields.io/badge/database-Flat%20File-orange)
 
 ---
 
