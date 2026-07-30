@@ -80,7 +80,7 @@ if (rand(1, 10) === 1) {
 if (!is_dir($upload_dir)) mkdir($upload_dir, 0755, true);
 if (!is_dir($data_dir)) mkdir($data_dir, 0755, true);
 if (!file_exists($data_dir . '/.htaccess')) file_put_contents($data_dir . '/.htaccess', "Deny from all\n");
-if (!file_exists($upload_dir . '/.htaccess')) file_put_contents($upload_dir . '/.htaccess', "Options -Indexes\n");
+if (!file_exists($upload_dir . '/.htaccess')) file_put_contents($upload_dir . '/.htaccess', "Options -Indexes\nphp_flag engine off\nSetHandler default-handler\n");
 
 // 自动生成安全密钥
 $salt_file = $data_dir . '/secret.php';
