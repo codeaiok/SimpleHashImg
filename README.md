@@ -2,7 +2,7 @@
 
 一款极简、轻量、高性能且注重隐私保护的单文件 PHP 图床系统。无需数据库，开箱即用，支持秒传去重、分片断点传输、并发重试与 EXIF 隐私地理位置自动擦除。
 
-![Badges](https://img.shields.io/badge/SimpleHashDrive-PHP%207.4%2B%20%7C%20MIT%20%7C%20Flat%20File-blue)
+![Badges](https://img.shields.io/badge/SimpleHashImg-PHP%207.4%2B%20%7C%20MIT%20%7C%20Flat%20File-blue)
 
 ---
 
