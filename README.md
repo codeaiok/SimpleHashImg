@@ -1,4 +1,4 @@
-﻿# SimpleHashImg Pro V33 📸
+﻿# SimpleHashImg Pro 📸
 
 一款极简、轻量、高性能且注重隐私保护的单文件 PHP 图床系统。无需数据库，开箱即用，支持秒传去重、分片断点传输、并发重试与 EXIF 隐私地理位置自动擦除。
 
