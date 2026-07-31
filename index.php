@@ -1,6 +1,6 @@
 <?php
 /**
- * SimpleHashImg V33 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 智能批次预检版
+ * SimpleHashImg V34 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 抗瘫痪防锁死图床版
  */
 
 error_reporting(0);
@@ -97,19 +97,18 @@ function stripImageMetadata($filePath, $ext) {
     $ext = strtolower($ext);
     if (!file_exists($filePath)) return;
 
-    // 1. JPEG/JPG 格式：纯二进制解析擦除 APP1(EXIF/GPS/XMP) 和 APP13 标记，无损且不损坏画质
     if (in_array($ext, ['jpg', 'jpeg'])) {
         $data = @file_get_contents($filePath);
         if ($data === false || strlen($data) < 4) return;
         
-        if (ord($data[0]) === 0xFF && ord($data[1]) === 0xD8) { // JPEG Header
+        if (ord($data[0]) === 0xFF && ord($data[1]) === 0xD8) {
             $newData = "\xFF\xD8";
             $len = strlen($data);
             $i = 2;
             while ($i < $len) {
                 if (ord($data[$i]) === 0xFF) {
                     $marker = ord($data[$i+1]);
-                    if ($marker === 0xD9) { // EOI
+                    if ($marker === 0xD9) {
                         $newData .= "\xFF\xD9";
                         break;
                     }
@@ -120,9 +119,8 @@ function stripImageMetadata($filePath, $ext) {
                     }
                     if ($i + 3 < $len) {
                         $segLen = (ord($data[$i+2]) << 8) + ord($data[$i+3]);
-                        // 0xE1 为 EXIF/GPS/XMP，0xED 为 Photoshop metadata
                         if ($marker === 0xE1 || $marker === 0xED) {
-                            $i += 2 + $segLen; // 跳过敏感 Segment
+                            $i += 2 + $segLen;
                             continue;
                         } else {
                             $newData .= substr($data, $i, 2 + $segLen);
@@ -139,7 +137,6 @@ function stripImageMetadata($filePath, $ext) {
         }
     }
 
-    // 2. PNG / WebP / BMP 格式：若支持 GD 扩展，重构图像自动剥离多余 text 块
     if (extension_loaded('gd') && in_array($ext, ['png', 'webp', 'bmp'])) {
         $img = @imagecreatefromstring(@file_get_contents($filePath));
         if ($img !== false) {
@@ -225,6 +222,7 @@ if (isset($_GET['v'])) {
                 $mime = $mimes[$ext] ?? 'image/jpeg';
                 
                 header("Content-Type: " . $mime);
+                header("Content-Length: " . filesize($path));
                 header("Cache-Control: public, max-age=86400");
                 readfile($path); exit;
             }
@@ -238,7 +236,6 @@ $act = $_GET['action'] ?? '';
 if ($act == 'delete_batch' || $act == 'delete') {
     $token = $_GET['token'];
     
-    // 1. 批次删除闭环校验（含存活预检）
     if ($act == 'delete_batch') {
         $sess = $_GET['sess'];
         if ($token !== md5($sess . $salt)) showMsgPage("验证失败", "访问令牌无效或已过期", true);
@@ -250,7 +247,6 @@ if ($act == 'delete_batch' || $act == 'delete') {
 
         $list = json_decode(@file_get_contents($sf), true) ?: [];
 
-        // 【增量优化】：预先检测批次中实际还“存活”的图片数量
         $activeCount = 0;
         foreach ($list as $h) {
             $ip = "$data_dir/idx_" . substr($h, 0, 2);
@@ -262,13 +258,11 @@ if ($act == 'delete_batch' || $act == 'delete') {
             }
         }
 
-        // 若批次内所有图片均已被单独删除，清理批次记录并提示
         if ($activeCount === 0) {
             @unlink($sf);
             showMsgPage("提示", "该批次的所有图片已被单独删除，无需重复处理", true);
         }
 
-        // 仅当还有存活图片时才弹出二次确认框
         if (!($_GET['confirm'] ?? 0)) {
             echo '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>确认删除</title><style>*{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#fff1f2;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}.card{background:white;padding:35px 25px;border-radius:24px;box-shadow:0 15px 35px rgba(225,29,72,0.1);text-align:center;width:100%;max-width:400px;border:1px solid #ffe4e6}h2{color:#e11d48;margin:0 0 10px;font-size:20px}p{color:#64748b;font-size:14px;margin-bottom:25px;line-height:1.5}.btn-group{display:flex;gap:10px}.btn{flex:1;padding:12px;border-radius:12px;text-decoration:none;font-weight:bold;font-size:14px;text-align:center}.yes{background:#e11d48;color:white}.no{background:#f1f5f9;color:#475569}</style></head><body><div class="card"><h2>确认删除该批次所有图片？</h2><p>此操作将永久抹除所有对应的文件，且无法恢复。</p><div class="btn-group"><a href="?action=delete_batch&sess='.$sess.'&token='.$token.'&confirm=1" class="btn yes">确认删除</a><a href="'.$base_url.'" class="btn no">取消</a></div></div></body></html>';
             exit;
@@ -289,7 +283,6 @@ if ($act == 'delete_batch' || $act == 'delete') {
         showMsgPage("批次已彻底清空", "所选批次的所有图片已从物理磁盘删除");
     }
     
-    // 2. 单图删除闭环校验
     if ($act == 'delete') {
         $h = $_GET['hash'];
         if ($token === md5($h . $salt)) {
@@ -337,33 +330,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         if (file_exists($ip)) {
             $idxData = json_decode(file_get_contents($ip), true);
             if (isset($idxData[$h])) { 
-                $hit = true; 
-                $res = [
-                    'url' => getL($h, $ext), 
-                    'del' => getD($h, $salt),
-                    'batch_del' => getBD($sid, $salt)
-                ]; 
+                // 【手术修复：防死锁】必须校验物理文件确实存在才触发秒传
+                if (file_exists($idxData[$h]['p'])) {
+                    $hit = true; 
+                    $res = [
+                        'url' => getL($h, $ext), 
+                        'del' => getD($h, $salt),
+                        'batch_del' => getBD($sid, $salt)
+                    ]; 
+                } else {
+                    // 物理文件缺失时，自动清空旧坏索引，解锁秒传
+                    unset($idxData[$h]);
+                    file_put_contents($ip, json_encode($idxData));
+                }
             }
         }
         if ($hit) addToSess($h, $sid);
         echo json_encode(['hit' => $hit, 'hosted_count' => getHostedCount($data_dir)] + $res); exit;
     }
+
     if ($_GET['action'] === 'up_chunk') {
         $id = $_POST['id']; $idx = intval($_POST['idx']); $tmp = "$data_dir/tmp_$id";
         if (!is_dir($tmp)) mkdir($tmp, 0755, true);
         move_uploaded_file($_FILES['file']['tmp_name'], "$tmp/$idx");
         echo json_encode(['s' => 1]); exit;
     }
+
     if ($_GET['action'] === 'merge') {
         $h = $_POST['hash']; $id = $_POST['id']; $ext = $_POST['ext']; $sid = $_POST['sid'];
         $tmp = "$data_dir/tmp_$id"; $saveP = "$upload_dir/" . date('Y-m-d');
         if (!is_dir($saveP)) mkdir($saveP, 0755, true);
-        $final = "$saveP/$h"; $dest = fopen($final, "wb");
-        $chunks = glob("$tmp/*", GLOB_NOSORT); natsort($chunks);
-        foreach ($chunks as $c) { $src = fopen($c, "rb"); while ($b = fread($src, 4096)) fwrite($dest, $b); fclose($src); unlink($c); }
-        fclose($dest); rmdir($tmp);
+        $final = "$saveP/$h"; 
         
-        // 文件合并完成后，自动清洗 EXIF / GPS 坐标元数据
+        // 【手术修复：排他写锁】防并发写死与重试冲突
+        $dest = fopen($final, "wb");
+        if (!$dest || !flock($dest, LOCK_EX)) {
+            echo json_encode(['error' => '服务器繁忙，图片合并中']); exit;
+        }
+
+        $chunks = glob("$tmp/*", GLOB_NOSORT); natsort($chunks);
+        foreach ($chunks as $c) { 
+            $src = fopen($c, "rb"); 
+            while ($b = fread($src, 4096)) fwrite($dest, $b); 
+            fclose($src); 
+            @unlink($c); 
+        }
+        flock($dest, LOCK_UN);
+        fclose($dest); 
+        @rmdir($tmp);
+        
+        // 【手术修复：EXIF擦除前精准防腐校验】
+        // 必须在擦除 EXIF 之前校验原始字节大小，丢失分片直接强抹扔掉！
+        $expectedSize = isset($_POST['size']) ? intval($_POST['size']) : 0;
+        if ($expectedSize > 0 && filesize($final) !== $expectedSize) {
+            @unlink($final);
+            echo json_encode(['error' => '弱网导致图片分片缺失，已自动丢弃坏图，请重新上传']); exit;
+        }
+
+        // 文件完整后，安全执行 EXIF / GPS 坐标清洗
         stripImageMetadata($final, $ext);
 
         $ip = "$data_dir/idx_" . substr($h, 0, 2);
@@ -388,7 +412,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>SimpleHashImg Pro</title>
+    <title>SimpleHashImg Pro V34</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         :root { --main: #6366f1; --accent: #4f46e5; --danger: #f43f5e; --success: #10b981; }
@@ -398,7 +422,6 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
         .app { background: white; width: 100%; max-width: 960px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; position: relative; }
         @media (min-width: 768px) { .app { height: 92vh; border-radius: 28px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.08); border: 1px solid #e2e8f0; } }
 
-        /* 顶部导航 */
         .app-header { padding: 16px 24px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: #fff; z-index: 10; gap: 15px; }
         .logo { font-size: 1.25rem; font-weight: 900; letter-spacing: -0.5px; white-space: nowrap; }
         .logo span { color: var(--main); }
@@ -411,8 +434,6 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 
         @media (max-width: 640px) {
             .app-header { padding: 12px 16px; flex-direction: column; align-items: stretch; gap: 8px; }
-            .header-top-row { display: flex; justify-content: space-between; align-items: center; width: 100%; }
-            /* 移动端贯穿线 & 右侧对齐修复 */
             .meta-stats { 
                 justify-content: flex-end; 
                 width: calc(100% + 32px); 
@@ -425,44 +446,35 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
             }
         }
 
-        /* 主界面 */
         .app-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 
-        /* 上传卡片 */
         .upload-card { padding: 16px 20px; border-bottom: 1px solid #e2e8f0; background: #fff; flex-shrink: 0; z-index: 5; transition: all 0.3s ease; }
         .app-body.empty .upload-card { flex: 1; display: flex; flex-direction: column; justify-content: center; border-bottom: none; background: transparent; }
-        /* 优化：非空时加长拉深 drop-zone 高度，更显大气 */
         .drop-zone { 
-                    border: 2px dashed #cbd5e1; border-radius: 20px; padding: 46px 20px; min-height: 170px; text-align: center; color: #94a3b8; 
-                    cursor: pointer; transition: all 0.2s ease; background: #fafafa; display: flex; flex-direction: column; 
-                    align-items: center; justify-content: center; gap: 10px; width: 100%;
-                }
+            border: 2px dashed #cbd5e1; border-radius: 20px; padding: 46px 20px; min-height: 170px; text-align: center; color: #94a3b8; 
+            cursor: pointer; transition: all 0.2s ease; background: #fafafa; display: flex; flex-direction: column; 
+            align-items: center; justify-content: center; gap: 10px; width: 100%;
+        }
         .app-body.empty .drop-zone { flex: 1; min-height: 240px; padding: 50px 20px; background: #fff; }
         .drop-zone:hover, .drop-zone.active { border-color: var(--main); background: #f5f7ff; color: var(--main); }
         .drop-icon { font-size: 32px; line-height: 1; }
 
-        /* 工具栏 */
         .controls-toolbar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; gap: 12px; flex-wrap: wrap; }
         .left-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-
-        /* 移动端“开始上传”按钮靠右布局修复 */
         #start-btn { margin-left: auto; }
 
         .toggle-label { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; color: #475569; cursor: pointer; user-select: none; }
         .toggle-label input { width: 16px; height: 16px; accent-color: var(--main); cursor: pointer; }
 
-        /* 列表容器 */
         .list-section { flex: 1; overflow-y: auto; padding: 16px 20px 20px; display: none; background: #f8fafc; }
         .app-body:not(.empty) .list-section { display: block; }
         .list-section::-webkit-scrollbar { width: 5px; }
         .list-section::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
 
-        /* 汇总框 */
         .batch-card { background: #fff; border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02); }
         .batch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 0.85rem; font-weight: 700; color: #475569; }
         .batch-area { width: 100%; height: 90px; padding: 12px; border-radius: 12px; border: 1px solid #cbd5e1; font-size: 0.8rem; font-family: monospace; box-sizing: border-box; background: #fafafa; resize: vertical; line-height: 1.5; color: #334155; }
 
-        /* 单图卡片 */
         .item-card { background: white; border: 1px solid #e2e8f0; border-radius: 16px; margin-bottom: 12px; display: flex; flex-direction: column; overflow: hidden; width: 100%; position: relative; transition: 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
         @media (min-width: 640px) { .item-card { flex-direction: row; min-height: 115px; height: auto; } }
         .item-card:hover { border-color: var(--main); }
@@ -500,7 +512,6 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
         }
         .item-remove-btn svg { width: 14px; height: 14px; fill: currentColor; }
 
-        /* 底部 Footer */
         .app-footer { padding: 12px 20px; border-top: 1px solid #f1f5f9; text-align: center; font-size: 0.75rem; color: #94a3b8; background: #fff; flex-shrink: 0; }
 
         .btn { padding: 8px 16px; border-radius: 10px; border: none; cursor: pointer; font-size: 0.8rem; font-weight: 700; transition: 0.2s; }
@@ -518,7 +529,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 
 <div class="app">
     <div class="app-header">
-        <div class="logo">SimpleHashImg <span>Pro</span></div>
+        <div class="logo">SimpleHashImg <span>Pro V34</span></div>
         <div class="meta-stats">
             <span class="stat-item" id="wait-box">待上传: <span class="badge badge-wait" id="wait-num">0</span></span>
             <span class="stat-item" id="done-box">已成功: <span class="badge badge-success" id="done-num">0</span></span>
@@ -583,7 +594,6 @@ document.getElementById('sort-toggle-btn').innerText = `排序: ${displayOrder =
 dz.onclick = () => { fi.value = ''; fi.click(); };
 fi.onchange = e => handleFiles(e.target.files);
 
-// 优化：全局率先拦截拖拽，保证页面未完全就绪时拖拽文件不会意外跳转/打开文件
 ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(ev => {
     window.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); }, false);
 });
@@ -621,11 +631,10 @@ function handleFiles(files) {
     for (let file of files) {
         if (!file.type.startsWith('image/')) continue;
 
-        // 去重判断：利用文件名、文件大小、最后修改时间生成特征签名
         const fileKey = `${file.name}_${file.size}_${file.lastModified}`;
         const isDuplicate = queue.some(item => item.fileKey === fileKey);
         if (isDuplicate) {
-            continue; // 忽略重复图片
+            continue;
         }
         
         globalSeqCounter++;
@@ -642,7 +651,7 @@ function handleFiles(files) {
             name: file.name,
             status: 'wait', 
             ext: file.name.split('.').pop().toLowerCase() || 'jpg',
-            sizeStr: formatSize(file.size), // 【新增】格式化后的文件大小
+            sizeStr: formatSize(file.size),
             url: '',
             del: ''
         };
@@ -690,14 +699,12 @@ function renderItemCard(item) {
         lc.appendChild(div);
     }
 
-if (item.file) {
-        // 大厂极速 Blob 指针预览，0 CPU 占用，0 毫秒延迟
+    if (item.file) {
         const blobUrl = URL.createObjectURL(item.file);
         document.getElementById(`pre-${item.id}`).innerHTML = `<img src="${blobUrl}">`;
     } else if (item.previewUrl) {
         document.getElementById(`pre-${item.id}`).innerHTML = `<img src="${item.previewUrl}">`;
     }
-
 }
 
 function applyDOMSort() {
@@ -736,7 +743,6 @@ function removeSingle(qid) {
         const card = document.getElementById(`card-${qid}`);
         if(card) card.remove();
         
-        // 修复：当全部 X 掉后，归零序号，使下次拖入时序号重 1 开始
         if(queue.length === 0) {
             appBody.classList.add('empty');
             globalSeqCounter = 0;
@@ -783,7 +789,7 @@ async function processUpload(item) {
     updateStatsAndBatch();
     
     const st = document.getElementById(`st-${item.id}`), bar = document.getElementById(`bar-${item.id}`), prog = document.getElementById(`prog-${item.id}`);
-    if (st) { st.innerText = "图片上传中..."; st.style.color = "var(--main)"; }
+    if (st) { st.innerText = "图片解析/传输中..."; st.style.color = "var(--main)"; }
     if (prog) prog.style.display = "block";
 
     try {
@@ -793,6 +799,12 @@ async function processUpload(item) {
         });
 
         const check = await fetchWithRetry(() => ajax('?action=check', { hash: hash, ext: item.ext, sid: sessID }));
+        if (check.error) {
+            item.status = 'error';
+            setErrorUI(item, check.error);
+            updateStatsAndBatch();
+            return;
+        }
         if (check.hit) return finishItem(item, check);
 
         const sz = 512 * 1024, total = Math.ceil(item.file.size / sz), uid = item.uid;
@@ -803,22 +815,29 @@ async function processUpload(item) {
             if (bar) bar.style.width = ((i + 1) / total * 95) + '%';
         }
 
-        const res = await fetchWithRetry(() => ajax('?action=merge', { id: uid, hash: hash, ext: item.ext, sid: sessID }));
+        // 【手术修复：包含 size 参数传送后端强防腐】
+        const res = await fetchWithRetry(() => ajax('?action=merge', { id: uid, hash: hash, ext: item.ext, sid: sessID, size: item.file.size }));
+        if (res.error) {
+            item.status = 'error';
+            setErrorUI(item, res.error);
+            updateStatsAndBatch();
+            return;
+        }
         finishItem(item, res);
 
     } catch (error) {
         item.status = 'error';
-        setErrorUI(item);
+        setErrorUI(item, "上传异常，点击重试");
         updateStatsAndBatch();
         saveToCache();
     }
 }
 
-function setErrorUI(item) {
+function setErrorUI(item, msg = "❌ 上传失败 (点击重试)") {
     const st = document.getElementById(`st-${item.id}`);
     const prog = document.getElementById(`prog-${item.id}`);
     if (st) {
-        st.innerText = "❌ 上传失败 (点击重试)";
+        st.innerText = msg;
         st.style.color = "var(--danger)";
         st.style.cursor = "pointer";
         st.onclick = () => processUpload(item);
@@ -919,11 +938,9 @@ function restoreFromCache() {
         if (cache.doneUrls && cache.doneUrls.length > 0) {
             appBody.classList.remove('empty');
             
-            // 1. 还原顶部“已成功: N”数字徽章
             document.getElementById('done-box').style.display = 'inline-flex';
             document.getElementById('done-num').innerText = cache.doneCount || cache.doneUrls.length;
 
-            // 2. 还原批量外链框与批次删除按钮
             document.getElementById('batch-card').style.display = 'block';
             document.getElementById('all-urls').value = cache.doneUrls.join('\n');
             if (cache.batchDelUrl) {
@@ -954,13 +971,17 @@ function clearAll() {
 
 async function ajax(u, d) { const fd = new FormData(); for (let k in d) fd.append(k, d[k]); return fetch(u, { method: 'POST', body: fd }).then(r => r.json()); }
 
+function showToast(msg) {
+    const t = document.getElementById('toast'); 
+    t.innerText = msg;
+    t.style.display = 'block'; 
+    setTimeout(() => t.style.display = 'none', 2500);
+}
+
 function cp(txt) {
     if (!txt) return;
     const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
-    const t = document.getElementById('toast'); 
-    t.innerText = "✔ 已复制";
-    t.style.display = 'block'; 
-    setTimeout(() => t.style.display = 'none', 1500);
+    showToast("✔ 已复制");
 }
 </script>
 </body>
