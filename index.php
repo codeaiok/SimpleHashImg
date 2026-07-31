@@ -1,6 +1,6 @@
 <?php
 /**
- * SimpleHashImg Pro V35 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 全网跨域防截断图床版
+ * SimpleHashImg Pro V36 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 全网跨域防截断图床版
  */
 
 error_reporting(0);
@@ -199,7 +199,7 @@ function showMsgPage($title, $msg, $is_error = false) {
     exit;
 }
 
-// 图片预览/直链输出（手术修复：全网 CORS 支持 + 流式防截断 + SVG 防 XSS 沙箱）
+// 图片预览/直链输出（支持 HTTP Range 断点续传 + 全网 CORS + 304 缓存 + SVG 防 XSS 沙箱）
 if (isset($_GET['v'])) {
     $h = preg_replace('/\.[^.]+$/', '', $_GET['v']);
     $idxP = "$data_dir/idx_" . substr($h, 0, 2);
@@ -210,19 +210,28 @@ if (isset($_GET['v'])) {
             $path = $idx[$h]['p'];
             if (file_exists($path)) {
 
-                // === 新增：HTTP 304 协商缓存（专治图床 F5 刷新重复下载） ===
+                $fileSize = filesize($path);
                 $mtime = filemtime($path);
-                $etag = sprintf('"%x-%x"', $mtime, filesize($path));
+                $etag = sprintf('"%x-%x"', $mtime, $fileSize);
 
+                // 1. 彻底清空输出缓冲区，解除内存与超时限制
+                @set_time_limit(0);
+                @ini_set('memory_limit', '512M');
+                while (ob_get_level() > 0) { @ob_end_clean(); }
+
+                // 2. HTTP 304 协商缓存 + 全局 CORS 跨域（确保全网外部网站 <img> 跨域引用）
                 header("Last-Modified: " . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
                 header("ETag: " . $etag);
+                header("Accept-Ranges: bytes"); // 宣告支持图片分片/断点续传
+                header("Access-Control-Allow-Origin: *"); // 全网外链引用支持
+                header("Cache-Control: public, max-age=86400");
+                header("X-Accel-Buffering: no");
 
                 if ((isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $mtime) ||
                     (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag)) {
                     header('HTTP/1.1 304 Not Modified');
                     exit;
                 }
-                // ==========================================================
 
                 $mimes = [
                     'jpg'  => 'image/jpeg',
@@ -235,35 +244,74 @@ if (isset($_GET['v'])) {
                     'bmp'  => 'image/bmp'
                 ];
                 $mime = $mimes[$ext] ?? 'image/jpeg';
-                
-                // 清理缓冲，提升大图加载性能
-                @set_time_limit(0);
-                while (ob_get_level() > 0) {
-                    @ob_end_clean();
-                }
-
                 header("Content-Type: " . $mime);
-                header("Content-Length: " . filesize($path));
-                header("Cache-Control: public, max-age=86400");
-                header("Access-Control-Allow-Origin: *"); // 支持全网外部网站跨域引用图床
-                header("X-Accel-Buffering: no"); // 禁用 Nginx 输出缓冲
 
                 // 防范 SVG 图片 XSS 跨站脚本攻击沙箱保护
                 if ($ext === 'svg') {
                     header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
                 }
 
-                // 采用 512KB 流式分块吐出数据，彻底避免大图/GIF 显示中断
-                $fp = @fopen($path, 'rb');
-                if ($fp !== false) {
-                    while (!feof($fp) && connection_status() == 0) {
-                        echo fread($fp, 524288);
-                        @ob_flush();
-                        @flush();
+                // 3. 全路径捕捉 FastCGI / CGI 环境下的 HTTP Range 请求头
+                $rawRange = $_SERVER['HTTP_RANGE'] ?? $_SERVER['REDIRECT_HTTP_RANGE'] ?? getenv('HTTP_RANGE') ?? getenv('REDIRECT_HTTP_RANGE') ?? '';
+
+                $start = 0;
+                $end = $fileSize - 1;
+
+                // 4. 解析 HTTP Range 请求（如 Safari 或大动图分片加载）
+                if (!empty($rawRange) && preg_match('/bytes=(\d*)-(\d*)/i', $rawRange, $matches)) {
+                    $c_start = $matches[1];
+                    $c_end = $matches[2];
+
+                    if ($c_start === '' && $c_end !== '') {
+                        $start = $fileSize - intval($c_end);
+                        $end = $fileSize - 1;
+                    } elseif ($c_start !== '' && $c_end === '') {
+                        $start = intval($c_start);
+                        $end = $fileSize - 1;
+                    } elseif ($c_start !== '' && $c_end !== '') {
+                        $start = intval($c_start);
+                        $end = intval($c_end);
                     }
-                    fclose($fp);
+
+                    $start = max(0, min($start, $fileSize - 1));
+                    $end = max($start, min($end, $fileSize - 1));
+                    $length = $end - $start + 1;
+
+                    http_response_code(206);
+                    header('HTTP/1.1 206 Partial Content');
+                    header("Content-Range: bytes $start-$end/$fileSize");
+                    header("Content-Length: " . $length);
+
+                    $fp = @fopen($path, 'rb');
+                    if ($fp !== false) {
+                        fseek($fp, $start);
+                        $bufferSize = 32768; // 32KB 冲刷缓存，提升图片渐进式加载体验
+                        $bytesLeft = $length;
+                        while ($bytesLeft > 0 && !feof($fp) && connection_status() == 0) {
+                            $readLen = min($bytesLeft, $bufferSize);
+                            $data = fread($fp, $readLen);
+                            echo $data;
+                            @ob_flush();
+                            @flush();
+                            $bytesLeft -= strlen($data);
+                        }
+                        fclose($fp);
+                        exit;
+                    }
+                } else {
+                    // 无 Range 请求，吐出完整图片数据
+                    header("Content-Length: " . $fileSize);
+                    $fp = @fopen($path, 'rb');
+                    if ($fp !== false) {
+                        while (!feof($fp) && connection_status() == 0) {
+                            echo fread($fp, 32768); // 32KB
+                            @ob_flush();
+                            @flush();
+                        }
+                        fclose($fp);
+                    }
+                    exit;
                 }
-                exit;
             }
         }
     }
@@ -461,7 +509,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>SimpleHashImg Pro V35</title>
+    <title>SimpleHashImg Pro V36</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         :root { --main: #6366f1; --accent: #4f46e5; --danger: #f43f5e; --success: #10b981; }
@@ -578,7 +626,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 
 <div class="app">
     <div class="app-header">
-        <div class="logo">SimpleHashImg <span>Pro V35</span></div>
+        <div class="logo">SimpleHashImg <span>Pro V36</span></div>
         <div class="meta-stats">
             <span class="stat-item" id="wait-box">待上传: <span class="badge badge-wait" id="wait-num">0</span></span>
             <span class="stat-item" id="done-box">已成功: <span class="badge badge-success" id="done-num">0</span></span>
