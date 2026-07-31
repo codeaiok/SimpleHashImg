@@ -1,6 +1,6 @@
 <?php
 /**
- * SimpleHashImg V34 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 抗瘫痪防锁死图床版
+ * SimpleHashImg Pro V35 - 逻辑完美闭环 & 隐私元数据(EXIF/GPS)自动擦除 & 全网跨域防截断图床版
  */
 
 error_reporting(0);
@@ -199,7 +199,7 @@ function showMsgPage($title, $msg, $is_error = false) {
     exit;
 }
 
-// 预览功能
+// 图片预览/直链输出（手术修复：全网 CORS 支持 + 流式防截断 + SVG 防 XSS 沙箱）
 if (isset($_GET['v'])) {
     $h = preg_replace('/\.[^.]+$/', '', $_GET['v']);
     $idxP = "$data_dir/idx_" . substr($h, 0, 2);
@@ -221,10 +221,34 @@ if (isset($_GET['v'])) {
                 ];
                 $mime = $mimes[$ext] ?? 'image/jpeg';
                 
+                // 清理缓冲，提升大图加载性能
+                @set_time_limit(0);
+                while (ob_get_level() > 0) {
+                    @ob_end_clean();
+                }
+
                 header("Content-Type: " . $mime);
                 header("Content-Length: " . filesize($path));
                 header("Cache-Control: public, max-age=86400");
-                readfile($path); exit;
+                header("Access-Control-Allow-Origin: *"); // 支持全网外部网站跨域引用图床
+                header("X-Accel-Buffering: no"); // 禁用 Nginx 输出缓冲
+
+                // 防范 SVG 图片 XSS 跨站脚本攻击沙箱保护
+                if ($ext === 'svg') {
+                    header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
+                }
+
+                // 采用 512KB 流式分块吐出数据，彻底避免大图/GIF 显示中断
+                $fp = @fopen($path, 'rb');
+                if ($fp !== false) {
+                    while (!feof($fp) && connection_status() == 0) {
+                        echo fread($fp, 524288);
+                        @ob_flush();
+                        @flush();
+                    }
+                    fclose($fp);
+                }
+                exit;
             }
         }
     }
@@ -362,24 +386,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         if (!is_dir($saveP)) mkdir($saveP, 0755, true);
         $final = "$saveP/$h"; 
         
-        // 【手术修复：排他写锁】防并发写死与重试冲突
+        // 排他写锁：防并发写死与重试冲突
         $dest = fopen($final, "wb");
         if (!$dest || !flock($dest, LOCK_EX)) {
             echo json_encode(['error' => '服务器繁忙，图片合并中']); exit;
         }
 
+        // 【手术修复：利用底层 stream_copy_to_stream 极速拼接分片】
         $chunks = glob("$tmp/*", GLOB_NOSORT); natsort($chunks);
         foreach ($chunks as $c) { 
             $src = fopen($c, "rb"); 
-            while ($b = fread($src, 4096)) fwrite($dest, $b); 
-            fclose($src); 
+            if ($src) {
+                stream_copy_to_stream($src, $dest);
+                fclose($src); 
+            }
             @unlink($c); 
         }
         flock($dest, LOCK_UN);
         fclose($dest); 
         @rmdir($tmp);
         
-        // 【手术修复：EXIF擦除前精准防腐校验】
+        // 【EXIF擦除前精准防腐校验】
         // 必须在擦除 EXIF 之前校验原始字节大小，丢失分片直接强抹扔掉！
         $expectedSize = isset($_POST['size']) ? intval($_POST['size']) : 0;
         if ($expectedSize > 0 && filesize($final) !== $expectedSize) {
@@ -412,7 +439,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>SimpleHashImg Pro V34</title>
+    <title>SimpleHashImg Pro V35</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         :root { --main: #6366f1; --accent: #4f46e5; --danger: #f43f5e; --success: #10b981; }
@@ -529,7 +556,7 @@ function getBD($sid, $s) { global $base_url; return $base_url . "delete-batch/$s
 
 <div class="app">
     <div class="app-header">
-        <div class="logo">SimpleHashImg <span>Pro V34</span></div>
+        <div class="logo">SimpleHashImg <span>Pro V35</span></div>
         <div class="meta-stats">
             <span class="stat-item" id="wait-box">待上传: <span class="badge badge-wait" id="wait-num">0</span></span>
             <span class="stat-item" id="done-box">已成功: <span class="badge badge-success" id="done-num">0</span></span>
@@ -815,7 +842,6 @@ async function processUpload(item) {
             if (bar) bar.style.width = ((i + 1) / total * 95) + '%';
         }
 
-        // 【手术修复：包含 size 参数传送后端强防腐】
         const res = await fetchWithRetry(() => ajax('?action=merge', { id: uid, hash: hash, ext: item.ext, sid: sessID, size: item.file.size }));
         if (res.error) {
             item.status = 'error';
