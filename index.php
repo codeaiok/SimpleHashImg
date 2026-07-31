@@ -209,6 +209,21 @@ if (isset($_GET['v'])) {
             $ext = strtolower($idx[$h]['e'] ?? 'jpg');
             $path = $idx[$h]['p'];
             if (file_exists($path)) {
+
+                // === 新增：HTTP 304 协商缓存（专治图床 F5 刷新重复下载） ===
+                $mtime = filemtime($path);
+                $etag = sprintf('"%x-%x"', $mtime, filesize($path));
+
+                header("Last-Modified: " . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
+                header("ETag: " . $etag);
+
+                if ((isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $mtime) ||
+                    (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag)) {
+                    header('HTTP/1.1 304 Not Modified');
+                    exit;
+                }
+                // ==========================================================
+
                 $mimes = [
                     'jpg'  => 'image/jpeg',
                     'jpeg' => 'image/jpeg',
@@ -374,11 +389,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     }
 
     if ($_GET['action'] === 'up_chunk') {
-        $id = $_POST['id']; $idx = intval($_POST['idx']); $tmp = "$data_dir/tmp_$id";
-        if (!is_dir($tmp)) mkdir($tmp, 0755, true);
-        move_uploaded_file($_FILES['file']['tmp_name'], "$tmp/$idx");
-        echo json_encode(['s' => 1]); exit;
-    }
+            $id = $_POST['id']; $idx = intval($_POST['idx']); $tmp = "$data_dir/tmp_$id";
+            if (!is_dir($tmp)) mkdir($tmp, 0755, true);
+            $cFile = "$tmp/$idx";
+            
+            // 【断点续传优化】：若该分片已完整存在，直接跳过上传，避免免费主机频控限制
+            if (file_exists($cFile) && filesize($cFile) > 0 && isset($_FILES['file']) && filesize($cFile) == $_FILES['file']['size']) {
+                echo json_encode(['s' => 1, 'skip' => 1]); exit;
+            }
+            
+            move_uploaded_file($_FILES['file']['tmp_name'], $cFile);
+            echo json_encode(['s' => 1]); exit;
+        }
 
     if ($_GET['action'] === 'merge') {
         $h = $_POST['hash']; $id = $_POST['id']; $ext = $_POST['ext']; $sid = $_POST['sid'];
@@ -816,44 +838,48 @@ async function processUpload(item) {
     updateStatsAndBatch();
     
     const st = document.getElementById(`st-${item.id}`), bar = document.getElementById(`bar-${item.id}`), prog = document.getElementById(`prog-${item.id}`);
-    if (st) { st.innerText = "图片解析/传输中..."; st.style.color = "var(--main)"; }
+    if (st) { st.innerText = "准备传输..."; st.style.color = "var(--main)"; }
     if (prog) prog.style.display = "block";
 
+    // 记录开始传输时间
+    item.startTime = item.startTime || Date.now();
+
     try {
-        const hash = await new Promise(r => {
+        const hash = item.hash || await new Promise(r => {
             const f = new FileReader(); f.readAsArrayBuffer(item.file);
             f.onload = e => r(SparkMD5.ArrayBuffer.hash(e.target.result));
         });
+            item.hash = hash;
 
         const check = await fetchWithRetry(() => ajax('?action=check', { hash: hash, ext: item.ext, sid: sessID }));
-        if (check.error) {
-            item.status = 'error';
-            setErrorUI(item, check.error);
-            updateStatsAndBatch();
-            return;
-        }
+        if (check.error) { item.status = 'error'; setErrorUI(item, check.error); updateStatsAndBatch(); return; }
         if (check.hit) return finishItem(item, check);
 
-        const sz = 512 * 1024, total = Math.ceil(item.file.size / sz), uid = item.uid;
+        const sz = 1024 * 1024, total = Math.ceil(item.file.size / sz), uid = item.uid;
         for (let i = 0; i < total; i++) {
             const fd = new FormData(); fd.append('file', item.file.slice(i * sz, (i + 1) * sz)); fd.append('id', uid); fd.append('idx', i);
             
             await fetchWithRetry(() => fetch('?action=up_chunk', { method: 'POST', body: fd }));
-            if (bar) bar.style.width = ((i + 1) / total * 95) + '%';
+            
+            // 动态计算已用时间（秒）与实时网速
+            const elapsed = Math.max(1, Math.floor((Date.now() - item.startTime) / 1000));
+            const uploadedBytes = Math.min((i + 1) * sz, item.file.size);
+            const speedStr = formatSize(uploadedBytes / elapsed) + '/s';
+            const percent = Math.round(((i + 1) / total) * 95);
+
+            if (st) st.innerText = `传输中 ${percent}% (用时 ${elapsed}s · ${speedStr})`;
+            if (bar) bar.style.width = percent + '%';
         }
 
+        if (st) st.innerText = "校验并合并分片中...";
         const res = await fetchWithRetry(() => ajax('?action=merge', { id: uid, hash: hash, ext: item.ext, sid: sessID, size: item.file.size }));
-        if (res.error) {
-            item.status = 'error';
-            setErrorUI(item, res.error);
-            updateStatsAndBatch();
-            return;
-        }
+        if (res.error) { item.status = 'error'; setErrorUI(item, res.error); updateStatsAndBatch(); return; }
+        
         finishItem(item, res);
 
     } catch (error) {
         item.status = 'error';
-        setErrorUI(item, "上传异常，点击重试");
+        setErrorUI(item, "❌ 传输中断 (点击重试)");
         updateStatsAndBatch();
         saveToCache();
     }
